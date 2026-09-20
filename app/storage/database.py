@@ -15,20 +15,26 @@ def init_db(engine: Engine | None = None) -> None:
     engine = engine or get_engine()
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
         conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS pages (
-                id              SERIAL PRIMARY KEY,
-                url             TEXT NOT NULL UNIQUE,
-                title           TEXT NOT NULL,
-                content         TEXT NOT NULL,
-                headings        JSONB NOT NULL DEFAULT '[]',
-                content_hash    TEXT NOT NULL,
-                scraped_at      TIMESTAMPTZ NOT NULL,
-                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            CREATE TABLE IF NOT EXISTS chunks (
+                id           SERIAL PRIMARY KEY,
+                page_url     TEXT NOT NULL REFERENCES pages(url) ON DELETE CASCADE,
+                page_title   TEXT NOT NULL,
+                content      TEXT NOT NULL,
+                heading_path TEXT NOT NULL DEFAULT '',
+                chunk_index  INT  NOT NULL,
+                token_count  INT,
+                embedding    vector(384),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (page_url, chunk_index)
             )
         """))
+
         conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_pages_content_hash
-            ON pages (content_hash)
+            CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+            ON chunks USING hnsw (embedding vector_cosine_ops)
         """))
-    logger.info("Database schema is ready")
+
+
+logger.info("Database schema is ready")
