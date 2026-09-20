@@ -9,10 +9,9 @@ import logging
 import sys
 from pathlib import Path
 
-# ---- این قسمت باید قبل از importهای app باشد ----
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-# ------------------------------------------------
 
 
 logging.basicConfig(
