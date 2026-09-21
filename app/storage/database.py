@@ -14,6 +14,15 @@ def get_engine() -> Engine:
     return create_engine(settings.database_url, pool_pre_ping=True)
 
 
+def get_readonly_engine() -> Engine:
+    """Engine فقط‌خواندنی برای سرور MCP — یوزر RO، pool کوچک."""
+    url = (
+        f"postgresql://{settings.mcp_db_user}:{settings.mcp_db_password}"
+        f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_db}"
+    )
+    return create_engine(url, pool_pre_ping=True, pool_size=2)
+
+
 def init_db(engine: Engine | None = None) -> None:
     """جداول و افزونه‌ها را ایجاد می‌کند — idempotent (قابل اجرای مکرر)."""
     engine = engine or get_engine()
