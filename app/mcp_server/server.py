@@ -1,11 +1,15 @@
-"""سرور MCP برای جست‌وجوی معنایی در مستندات Django.
+"""MCP server exposing semantic search over the Django documentation.
 
-سه ابزار ارائه می‌دهد:
-- search_docs: جست‌وجوی معنایی — وقتی کاربر درباره‌ی رفتار Django می‌پرسد
-- get_page: دریافت متن کامل یک صفحه — وقتی URL یا عنوان صفحه معلوم است
-- answer: پاسخ بر اساس تکه‌های بازیابی‌شده — پرسش مستقیم کاربر
+Provides three tools to any MCP client (Claude Desktop, MCP Inspector, ...):
+- search_docs: semantic search — when the user asks how something works
+  in Django and relevant passages are needed
+- get_page: full text of one page — when the URL or exact title is known
+- answer: a cited answer assembled from retrieved chunks — direct user question
 
-توصیف هر ابزار برای مدل زبانیِ کلاینت نوشته شده تا بداند کِی صدایش بزند.
+Tool descriptions (docstrings below) are written FOR the client's
+language model: they are what the model reads to decide which tool to
+call and with what arguments — write them like documentation for a
+colleague, not variable names.
 """
 from __future__ import annotations
 from app.storage.database import get_readonly_engine
@@ -17,6 +21,9 @@ import logging
 import sys
 from pathlib import Path
 
+# Make the project root importable when this file is launched as a
+# script by an MCP client (the client's CWD is not necessarily the
+# project root, so sys.path needs the root explicitly).
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -24,12 +31,20 @@ sys.path.insert(0, str(ROOT))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp_server")
 
+# One server instance; the name is what clients display to the user.
 mcp = MCPServer("django-docs-rag")
 
 _engine = None
 
 
 def engine():
+    """Lazily create the read-only database engine.
+
+    Lazy (not module-level) so that importing this module for tests or
+    introspection does not require a database to be reachable. The
+    engine uses the SELECT-only `rag_readonly` user — the first of the
+    three security layers documented in the README.
+    """
     global _engine
     if _engine is None:
         _engine = get_readonly_engine()
@@ -37,13 +52,18 @@ def engine():
 
 
 def _clip(text: str, limit: int) -> str:
-    """برش متن با نشانه‌ی ادامه — سقف اندازه‌ی نتایج (الزام امنیتی)."""
+    """Truncate text to `limit` characters with an explicit marker.
+
+    Security requirement: a 67k-char page must never be shipped to the
+    client in full — the cap protects the client's context window and
+    the marker makes truncation visible instead of silent.
+    """
     if len(text) <= limit:
         return text
     return text[:limit] + "\n… [truncated]"
 
 
-# ---------- ابزار ۱: search_docs ----------
+# ---------- Tool 1: search_docs ----------
 
 @mcp.tool()
 def search_docs(query: str, k: int = 5) -> str:
@@ -56,6 +76,8 @@ def search_docs(query: str, k: int = 5) -> str:
         query: Natural-language question or topic, e.g. 'how middleware works'.
         k: Number of results (1..10, default 5).
     """
+    # Input validation: clear message instead of a raw exception
+    # (task requirement — tool errors must be readable by the model).
     if not query or not query.strip():
         return "Error: 'query' must be a non-empty string."
 
@@ -63,7 +85,9 @@ def search_docs(query: str, k: int = 5) -> str:
         k = int(k)
     except (TypeError, ValueError):
         return "Error: 'k' must be an integer."
-    k = max(1, min(k, settings.mcp_max_k))  # سقف امنیتی
+    # Security cap: the client can never pull more than mcp_max_k
+    # results regardless of what it asks for.
+    k = max(1, min(k, settings.mcp_max_k))
 
     hits = semantic_search(query.strip(), k=k, engine=engine())
     if not hits:
@@ -80,7 +104,7 @@ def search_docs(query: str, k: int = 5) -> str:
     return f"Top {len(hits)} results for: {query!r}\n\n" + "\n\n".join(lines)
 
 
-# ---------- ابزار ۲: get_page ----------
+# ---------- Tool 2: get_page ----------
 
 @mcp.tool()
 def get_page(url_or_id: str) -> str:
@@ -96,6 +120,8 @@ def get_page(url_or_id: str) -> str:
     from sqlalchemy import text
 
     ident = url_or_id.strip()
+    # Match by exact URL OR exact title (titles are unique in our corpus
+    # since each docs page has one h1). Bound parameter — injection-safe.
     sql = text("""
         SELECT url, title, content FROM pages
         WHERE url = :ident OR title = :ident
@@ -105,7 +131,7 @@ def get_page(url_or_id: str) -> str:
         row = conn.execute(sql, {"ident": ident}).first()
 
     if row is None:
-        # پیام روشن، نه exception خام (الزام تسک)
+        # Clear, actionable message — not a raw exception (task requirement).
         return (f"Page not found: {ident!r}. Tip: pass the exact page "
                 f"title (e.g. 'Middleware') or the full URL as crawled "
                 f"from docs.djangoproject.com.")
@@ -115,12 +141,14 @@ def get_page(url_or_id: str) -> str:
             f"{_clip(content, settings.mcp_max_content_chars)}")
 
 
-# آستانه‌ی اطمینان: زیر این شباهت، نتیجه را «مرتبط» حساب نمی‌کنیم
-# (از ارزیابی: پایین‌ترین امتیازِ موفق ۰.۴۸ بود — کمی محافظه‌کارتر)
+# Confidence threshold: below this similarity a result is NOT considered
+# relevant. Data-driven value: the lowest successful hit in our
+# evaluation scored 0.483, so 0.45 sits just under real successes while
+# clearly rejecting off-topic queries (our pizza test scored 0.30).
 MIN_CONFIDENCE = 0.45
 
 
-# ---------- ابزار ۳: answer ----------
+# ---------- Tool 3: answer ----------
 
 @mcp.tool()
 def answer(question: str) -> str:
@@ -137,7 +165,8 @@ def answer(question: str) -> str:
 
     hits = semantic_search(question.strip(), k=5, engine=engine())
 
-    # الزام تسک: اگر پاسخی در تکه‌های بازیابی‌شده نبود، صادقانه بگو
+    # Task requirement: if the retrieved chunks contain no answer, say
+    # so honestly instead of presenting a weak match as an answer.
     if not hits or hits[0].similarity < MIN_CONFIDENCE:
         best = f"{hits[0].similarity:.3f}" if hits else "n/a"
         return ("I could not find relevant documentation for this question "
@@ -146,7 +175,8 @@ def answer(question: str) -> str:
                 "reference/guide pages may be missing. Please rephrase the "
                 "question or search the Django docs directly.")
 
-    # پاسخ استخراجی (بدون LLM خارجی): بهترین تکه‌ها با ارجاع
+    # Extractive answer (no external LLM): assemble the best chunks
+    # with citations — every claim is traceable to its source URL.
     parts = ["Answer based on the Django documentation "
              f"(top {len(hits)} passages):\n"]
     for i, h in enumerate(hits, 1):
@@ -156,11 +186,14 @@ def answer(question: str) -> str:
             f"    {_clip(h.content, 600)}\n"
             f"    Source: {h.page_url}"
         )
+    # Make the extractive nature explicit so the caller knows the
+    # passages ARE the answer, not an LLM paraphrase of them.
     parts.append("\nNote: this is an extractive answer assembled from the "
                  "passages above. For the full context, follow the source URLs.")
     return "\n".join(parts)
 
 
 def run() -> None:
-    """اجرای سرور روی stdio — ورودی استاندارد کلاینت‌های MCP."""
+    """Run the server on stdio — the standard transport for local MCP
+    clients like Claude Desktop and MCP Inspector."""
     mcp.run(transport="stdio")

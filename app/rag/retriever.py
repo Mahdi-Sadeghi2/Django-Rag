@@ -1,3 +1,10 @@
+"""Semantic retrieval over the chunk embeddings stored in pgvector.
+
+This is the heart of the RAG pipeline: embed the user's question with
+the SAME model used at indexing time, then find the k nearest chunk
+vectors by cosine distance in PostgreSQL.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -14,27 +21,53 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchHit:
-    """یک نتیجه‌ی بازیابی — همه‌چیزی که مدل زبانی برای پاسخ و ارجاع لازم دارد."""
+    """One retrieval result — everything a caller (MCP tool, evaluation,
+    future LLM) needs to build an answer with a proper source citation."""
     page_url: str
     page_title: str
     heading_path: str
     content: str
     chunk_index: int
-    similarity: float   # بین 0 و 1 — هرچه بیشتر، مرتبط‌تر
+    similarity: float   # 0..1 — higher means more relevant
 
 
 def search(query: str, k: int = 5, engine: Engine | None = None) -> list[SearchHit]:
-    """k تکه‌ی مرتبط‌ترین چانک با پرسش را با جست‌وجوی معنایی برمی‌گرداند.
+    """Return the k most semantically relevant chunks for a query.
 
-    - بردار پرسش با همان مدلِ ایندکس ساخته می‌شود (هم‌فضایی ضروری است)
-    - بردار به‌صورت رشته ارسال و با CAST به نوع pgvector تبدیل می‌شود
-      (::vector با placeholder-style پارامترهای SQLAlchemy سازگار نیست)
-    - عملگر <=> فاصله‌ی cosine است؛ شباهت = 1 - فاصله
-    - ایندکس HNSW به‌صورت خودکار برای این ORDER BY استفاده می‌شود
+    Notes on the SQL (each point earned its place the hard way):
+    - The query vector is embedded with the same model as the corpus —
+      query and documents must share one vector space to be comparable.
+    - The vector is sent as a '[0.1,0.2,...]' string and CAST to the
+      pgvector type in SQL. Two pitfalls avoided here:
+        * psycopg2 sends a plain Python list as numeric[], and
+          'vector <=> numeric[]' raises "operator does not exist";
+        * the '::vector' cast syntax collides with SQLAlchemy's
+          ':name' bind-parameter parser, so CAST(... AS ...) is used.
+    - <=> is pgvector's cosine *distance* (0 = identical). We convert
+      to a more intuitive similarity score: similarity = 1 - distance,
+      so higher = more relevant.
+    - The ORDER BY on the <=> expression is what lets PostgreSQL use
+      the HNSW index automatically — no index hint needed.
+    - A LIMIT of k, larger than the cap enforced by the MCP layer,
+      is the caller's responsibility; search itself trusts its input.
+
+    Args:
+        query: natural-language question or topic.
+        k: number of results to return.
+        engine: optional injected engine (tests); defaults to the
+            shared read-write engine — the MCP server passes its own
+            read-only engine.
+
+    Returns:
+        List of SearchHit, most relevant first (possibly empty).
     """
     engine = engine or get_engine()
 
+    # 1) Embed the query (uses the cached model — fast after first call).
     query_vec = embed_texts([query])[0]
+    # 2) Serialize to pgvector's string format; 6 decimal places are
+    #    far beyond any meaningful similarity precision and keep the
+    #    payload small.
     query_vec_str = "[" + ",".join(f"{x:.6f}" for x in query_vec) + "]"
 
     sql = text("""
@@ -45,7 +78,7 @@ def search(query: str, k: int = 5, engine: Engine | None = None) -> list[SearchH
         LIMIT :k
     """)
 
-    with engine.connect() as conn:
+    with engine.connect() as conn:  # read-only intent — no transaction needed
         rows = conn.execute(sql, {"qv": query_vec_str, "k": k}).all()
 
     hits = [
@@ -55,6 +88,8 @@ def search(query: str, k: int = 5, engine: Engine | None = None) -> list[SearchH
         )
         for r in rows
     ]
+    # Structured log line: makes search behavior observable in the
+    # MCP server logs (useful for debugging tool calls from a client).
     logger.info("search(%r, k=%d) → %d hits, top similarity %.3f",
                 query, k, len(hits), hits[0].similarity if hits else 0.0)
     return hits

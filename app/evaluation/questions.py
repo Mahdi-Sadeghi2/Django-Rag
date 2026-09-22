@@ -1,3 +1,13 @@
+"""The evaluation question set: 10 real Django questions, each labeled
+with the page(s) a correct answer must come from.
+
+Labels were set from knowledge of the documentation (verified manually),
+NOT from the system's own output — otherwise the evaluation would be
+circular. Question 9 was chosen because it failed manual testing, and
+question 10 is deliberately near-out-of-scope: together they probe the
+system's honest failure modes, not just its successes.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5,26 +15,27 @@ from dataclasses import dataclass
 
 @dataclass
 class EvalQuestion:
+    """One evaluation question with its ground-truth pages."""
     question: str
-    expected_page_titles: list[str]   # صفحاتی که پاسخ درست باید از آن‌ها بیاید
-    note: str = ""                    # چرا این پرسش انتخاب شد
+    expected_page_titles: list[str]   # pages a correct answer must come from
+    note: str = ""                    # why this question was chosen
 
 
 QUESTIONS: list[EvalQuestion] = [
     EvalQuestion(
         "How do I write a custom middleware?",
         ["Middleware"],
-        "پرسش فنی کلاسیک؛ جواب در صفحه‌ی Middleware است",
+        "Classic technical question; the answer lives on the Middleware page",
     ),
     EvalQuestion(
         "How can I cache the output of a view?",
         ["Django’s cache framework"],
-        "باید per-view cache و cache_page را پیدا کند",
+        "Should find per-view cache and cache_page",
     ),
     EvalQuestion(
         "What is the difference between select_related and prefetch_related?",
         ["Database access optimization", "Making queries"],
-        "پرسش مقایسه‌ای — یکی از سخت‌ترین انواع پرسش برای RAG",
+        "Comparative question — one of the hardest kinds for RAG",
     ),
     EvalQuestion(
         "How do database transactions work in Django?",
@@ -49,11 +60,12 @@ QUESTIONS: list[EvalQuestion] = [
     EvalQuestion(
         "What is get_absolute_url used for?",
         ["Models"],
-        "پرسشی که در جست‌وجوی دستی ضعیف جواب داد — می‌خواهیم ببینیم ارزیابی هم تأیید می‌کند",
+        "Failed in manual testing — checking whether the evaluation confirms it",
     ),
     EvalQuestion(
         "How do I serve static files in development?",
         ["Managing files"],
-        "static files در صفحات topics مستقیم پوشش داده نشده — بررسی رفتار سیستم روی پرسش خارج از حوزه",
+        "Static files are not directly covered by the topics pages — probes "
+        "behavior on a near-out-of-scope question",
     ),
 ]
